@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function roomDoc(id) { return get(/databases/$(database)/documents/rooms/$(id)); }
+    function isHost(id) { return signedIn() && roomDoc(id).data.hostUid == request.auth.uid; }
+    function isOwner(id, seat) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/rooms/$(id)/seats/$(seat)) &&
+        get(/databases/$(database)/documents/rooms/$(id)/seats/$(seat)).data.ownerUid == request.auth.uid;
+    }
+    function validSeat(seat) { return seat is string && seat.matches('p[0-9]'); }
+    function validRoomSeat(id, seat) {
+      return validSeat(seat) && (
+        (seat == 'p0' && roomDoc(id).data.roster.size() > 0) ||
+        (seat == 'p1' && roomDoc(id).data.roster.size() > 1) ||
+        (seat == 'p2' && roomDoc(id).data.roster.size() > 2) ||
+        (seat == 'p3' && roomDoc(id).data.roster.size() > 3) ||
+        (seat == 'p4' && roomDoc(id).data.roster.size() > 4) ||
+        (seat == 'p5' && roomDoc(id).data.roster.size() > 5) ||
+        (seat == 'p6' && roomDoc(id).data.roster.size() > 6) ||
+        (seat == 'p7' && roomDoc(id).data.roster.size() > 7) ||
+        (seat == 'p8' && roomDoc(id).data.roster.size() > 8) ||
+        (seat == 'p9' && roomDoc(id).data.roster.size() > 9));
+    }
+    function validVote(id, seat) {
+      return request.resource.data.keys().hasOnly(['seatId','style','fun']) &&
+        request.resource.data.seatId == seat &&
+        request.resource.data.style is string && validSeat(request.resource.data.style) &&
+        request.resource.data.fun is string && validSeat(request.resource.data.fun) &&
+        request.resource.data.style != seat && request.resource.data.fun != seat &&
+        validRoomSeat(id, request.resource.data.style) &&
+        validRoomSeat(id, request.resource.data.fun);
+    }
+    match /rooms/{id} {
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly(['hostUid','roster','phase','stage','current','createdAt']) &&
+        request.resource.data.hostUid == request.auth.uid &&
+        request.resource.data.roster is list &&
+        request.resource.data.roster.size() >= 6 &&
+        request.resource.data.roster.size() <= 10 &&
+        request.resource.data.phase == 'idle' &&
+        request.resource.data.stage == '0' && request.resource.data.current == '';
+      allow get: if signedIn();
+      allow list, delete: if false;
+      allow update: if isHost(id) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase','stage','current']) &&
+        request.resource.data.phase in ['idle','guess','closed','voting'] &&
+        request.resource.data.stage in ['0','1','2','3'] &&
+        (request.resource.data.current == '' || request.resource.data.current.matches('p[0-9]'));
+      match /seats/{seat} {
+        allow create: if signedIn() && validRoomSeat(id,seat) &&
+          request.resource.data.keys().hasOnly(['ownerUid','seatId']) &&
+          request.resource.data.ownerUid == request.auth.uid &&
+          request.resource.data.seatId == seat;
+        allow get: if isHost(id) || (signedIn() && resource.data.ownerUid == request.auth.uid);
+        allow list: if isHost(id);
+        allow update, delete: if false;
+      }
+      match /attempts/{attemptId} {
+        allow create: if signedIn() &&
+          request.resource.data.keys().hasOnly(['performer','stage','seatId','answer']) &&
+          request.resource.data.seatId is string && validSeat(request.resource.data.seatId) &&
+          isOwner(id,request.resource.data.seatId) &&
+          request.resource.data.performer == roomDoc(id).data.current &&
+          request.resource.data.performer != request.resource.data.seatId &&
+          request.resource.data.stage == roomDoc(id).data.stage &&
+          roomDoc(id).data.phase == 'guess' &&
+          attemptId == request.resource.data.performer + '_' + request.resource.data.stage + '_' + request.resource.data.seatId &&
+          request.resource.data.answer is string &&
+          request.resource.data.answer.size() > 0 && request.resource.data.answer.size() <= 120;
+        allow get: if isHost(id) || (signedIn() && isOwner(id,resource.data.seatId));
+        allow list: if isHost(id);
+        allow update, delete: if false;
+      }
+      match /rounds/{seat} {
+        allow get, list: if signedIn();
+        allow create, update: if isHost(id) &&
+          validRoomSeat(id,seat) &&
+          roomDoc(id).data.phase != 'guess' &&
+          request.resource.data.keys().hasOnly(['song','ktv','complete','stages']) &&
+          request.resource.data.song is string && request.resource.data.song.size() <= 100 &&
+          request.resource.data.ktv is int &&
+          request.resource.data.ktv >= 0 && request.resource.data.ktv <= 100 &&
+          request.resource.data.complete is bool &&
+          request.resource.data.stages is map;
+        allow delete: if false;
+      }
+      match /votes/{seat} {
+        allow create: if isOwner(id,seat) && roomDoc(id).data.phase == 'voting' && validVote(id,seat);
+        allow get: if isHost(id) || isOwner(id,seat);
+        allow list: if isHost(id);
+        allow update, delete: if false;
+      }
+      match /awards/{name} {
+        allow get: if signedIn();
+        allow list: if false;
+        allow create, update: if isHost(id) && name == 'final' &&
+          request.resource.data.keys().hasOnly(['published','styleWinners','funWinners']) &&
+          request.resource.data.published is bool &&
+          request.resource.data.styleWinners is list &&
+          request.resource.data.funWinners is list;
+        allow delete: if false;
+      }
+    }
+  }
+}
